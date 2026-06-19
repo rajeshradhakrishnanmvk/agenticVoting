@@ -1,0 +1,6 @@
+{
+  "name": "Community Voting System",
+  "description": "An interactive suggestion box and prioritization engine where users can submit proposals, cast upvotes or downvotes, and democratically steer community decisions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

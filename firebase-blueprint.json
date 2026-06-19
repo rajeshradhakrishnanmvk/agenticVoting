@@ -1,0 +1,459 @@
+{
+  "entities": {
+    "Proposal": {
+      "title": "Proposal",
+      "description": "A design proposal or idea submitted by a community member to be voted on",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The title of the proposal, must be concise and informative"
+        },
+        "description": {
+          "type": "string",
+          "description": "A brief description explaining the proposal"
+        },
+        "authorId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the community member who submitted it"
+        },
+        "authorName": {
+          "type": "string",
+          "description": "The display name of the author"
+        },
+        "authorEmail": {
+          "type": "string",
+          "description": "The email of the author who submitted it"
+        },
+        "upvotesCount": {
+          "type": "integer",
+          "description": "The total number of upvotes received"
+        },
+        "downvotesCount": {
+          "type": "integer",
+          "description": "The total number of downvotes received"
+        },
+        "netVotes": {
+          "type": "integer",
+          "description": "The net votes (upvotesCount - downvotesCount)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this proposal was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this proposal was last updated"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Governance", "Technical", "Community", "Treasury", "Events", "Meta"],
+          "description": "The selected category of the proposal"
+        },
+        "tags": {
+          "type": "array",
+          "description": "A collection of tags reflecting the specific scope of the proposal"
+        },
+        "priorityScore": {
+          "type": "integer",
+          "description": "The computed score for search priority, usually equal to netVotes"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "active", "passed", "rejected", "expired"],
+          "description": "The lifecycle status of this proposal which determines voting outcomes"
+        },
+        "durationDays": {
+          "type": "integer",
+          "description": "The duration picked by the author for public voting in days (1, 3, 7, 14, or 30)"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The date-time when the active voting window closes"
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "authorId",
+        "authorName",
+        "upvotesCount",
+        "downvotesCount",
+        "netVotes",
+        "createdAt",
+        "updatedAt",
+        "category",
+        "tags",
+        "priorityScore",
+        "status"
+      ]
+    },
+    "Vote": {
+      "title": "Vote",
+      "description": "A single user's vote (up or down) on a specific proposal",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the voter"
+        },
+        "voterName": {
+          "type": "string",
+          "description": "The display name of the voter for transparency"
+        },
+        "voteType": {
+          "type": "string",
+          "enum": ["up", "down"],
+          "description": "The choice: 'up' for upvote, 'down' for downvote"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the last vote update"
+        }
+      },
+      "required": [
+        "userId",
+        "voterName",
+        "voteType",
+        "updatedAt"
+      ]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "A community comment or threaded reply in response to a proposal",
+      "type": "object",
+      "properties": {
+        "proposalId": {
+          "type": "string",
+          "description": "The ID of the proposal this comment belongs to"
+        },
+        "parentId": {
+          "type": "string",
+          "description": "The ID of the parent comment, or null for top-level comments"
+        },
+        "content": {
+          "type": "string",
+          "description": "The markdown-formatted text content of the comment"
+        },
+        "authorId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the comment author"
+        },
+        "authorName": {
+          "type": "string",
+          "description": "The display name of the author"
+        },
+        "authorEmail": {
+          "type": "string",
+          "description": "The email of the author"
+        },
+        "upvotes": {
+          "type": "integer",
+          "description": "Total upvotes received by this comment"
+        },
+        "downvotes": {
+          "type": "integer",
+          "description": "Total downvotes received by this comment"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this comment was created"
+        },
+        "isInsightful": {
+          "type": "boolean",
+          "description": "True if the original proposal author marked this comment as insightful"
+        }
+      },
+      "required": [
+        "proposalId",
+        "content",
+        "authorId",
+        "authorName",
+        "upvotes",
+        "downvotes",
+        "createdAt"
+      ]
+    },
+    "CommentVote": {
+      "title": "CommentVote",
+      "description": "An individual's upvote or downvote cast on a comment",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The UID of the voter"
+        },
+        "voteType": {
+          "type": "string",
+          "enum": ["up", "down"],
+          "description": "The type of vote cast"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Vote timestamp"
+        }
+      },
+      "required": [
+        "userId",
+        "voteType",
+        "updatedAt"
+      ]
+    },
+    "User": {
+      "title": "User",
+      "description": "The public profile containing the accumulated reputation and streaks of a community member",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the community member"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The display name of the community member"
+        },
+        "email": {
+          "type": "string",
+          "description": "The verified email of the commenter or voter"
+        },
+        "reputation": {
+          "type": "integer",
+          "description": "The aggregate reputation score earned by public activities"
+        },
+        "badges": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "A list of automatically awarded honors and badges"
+        },
+        "streak": {
+          "type": "integer",
+          "description": "The active daily voting streak count of this user"
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The signup timestamp of this user"
+        },
+        "lastVotedDate": {
+          "type": "string",
+          "description": "The calendar date formatted as YYYY-MM-DD on which this user last voted"
+        },
+        "emailDigest": {
+          "type": "string",
+          "enum": ["none", "daily", "weekly"],
+          "description": "User preference for email summary updates"
+        },
+        "webhookUrl": {
+          "type": "string",
+          "description": "Secure callback webhook url for autonomous agents"
+        },
+        "lastVisit": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the user's last interactive visit"
+        },
+        "isAgent": {
+          "type": "boolean",
+          "description": "True if user is an agent"
+        },
+        "isVerifiedAgent": {
+          "type": "boolean",
+          "description": "True if user is verified as an agent"
+        }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "reputation",
+        "badges",
+        "streak",
+        "joinedAt"
+      ]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "A notification alert pushed to a user regarding activity in the goBodhi system",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The target UID receiving this notification"
+        },
+        "title": {
+          "type": "string",
+          "description": "The title of the notification alert"
+        },
+        "message": {
+          "type": "string",
+          "description": "Main notification text description"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this notification was created"
+        },
+        "read": {
+          "type": "boolean",
+          "description": "True if the user has marked this alert as read"
+        },
+        "type": {
+          "type": "string",
+          "description": "Classification of notification category or styling"
+        },
+        "proposalId": {
+          "type": "string",
+          "description": "The active proposal ID related to this notification if applicable"
+        }
+      },
+      "required": [
+        "userId",
+        "title",
+        "message",
+        "createdAt",
+        "read",
+        "type"
+      ]
+    },
+    "Delegation": {
+      "title": "Delegation",
+      "description": "A vote/reputation delegation from one user to another",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The Firestore document ID"
+        },
+        "delegatorId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the user delegating their vote"
+        },
+        "delegatorName": {
+          "type": "string",
+          "description": "The display name of the delegator"
+        },
+        "delegateId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the user receiving the delegation"
+        },
+        "delegateName": {
+          "type": "string",
+          "description": "The display name of the delegate"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["All", "Governance", "Technical", "Community", "Treasury", "Events", "Meta"],
+          "description": "The category over which the delegation applies"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when this delegation was created"
+        }
+      },
+      "required": [
+        "delegatorId",
+        "delegatorName",
+        "delegateId",
+        "delegateName",
+        "category",
+        "createdAt"
+      ]
+    },
+    "Challenge": {
+      "title": "Challenge",
+      "description": "A community-focused competitive challenge created by moderators",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["All", "Governance", "Technical", "Community", "Treasury", "Events", "Meta"]
+        },
+        "startDate": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "endDate": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "prizeDescription": {
+          "type": "string"
+        },
+        "winnerProposalId": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "creatorId": {
+          "type": "string"
+        },
+        "creatorName": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "title",
+        "description",
+        "category",
+        "startDate",
+        "endDate",
+        "prizeDescription",
+        "tag",
+        "creatorId",
+        "creatorName",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/challenges/{challengeId}": {
+      "schema": "Challenge",
+      "description": "Challenges that prompt the community to design solutions within specific bounds"
+    },
+    "/delegations/{delegationId}": {
+      "schema": "Delegation",
+      "description": "A collection tracking active vote delegations from users to delegates"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "A collection storing credentials, public reputations, and leaderboard info for each member"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "A global collection storing all in-app notifications for users"
+    },
+    "/proposals/{proposalId}": {
+      "schema": "Proposal",
+      "description": "A collection of proposals that are eligible for community voting"
+    },
+    "/proposals/{proposalId}/votes/{userId}": {
+      "schema": "Vote",
+      "description": "A subcollection tracking individual voter selections to prevent double voting"
+    },
+    "/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "A global collection containing all threaded comments across all proposals"
+    },
+    "/comments/{commentId}/commentVotes/{userId}": {
+      "schema": "CommentVote",
+      "description": "Tracking individual comment votes cast"
+    }
+  }
+}

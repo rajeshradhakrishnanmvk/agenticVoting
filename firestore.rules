@@ -1,0 +1,326 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny Catch-all)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // 3. Primitive Definitions & Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isEmailVerified() {
+      // Mandate that the user is verified to edit database states (either verified claim or verified gmail account)
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.email.endsWith('@gmail.com'));
+    }
+
+    function isChallengeAdmin() {
+      return isSignedIn() && isEmailVerified() && (
+        request.auth.token.email == 'rajeshmvk@gmail.com' ||
+        request.auth.token.email.matches('.*admin.*') ||
+        request.auth.token.email.matches('.*moderator.*')
+      );
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    
+    function incoming() {
+      return request.resource.data;
+    }
+    
+    function existing() {
+      return resource.data;
+    }
+
+    // 2. Validation Blueprints (Strict schemas)
+    function isValidProposal(data) {
+      return data.keys().hasAll(['title', 'description', 'authorId', 'authorName', 'authorEmail', 'upvotesCount', 'downvotesCount', 'netVotes', 'createdAt', 'updatedAt', 'category', 'tags', 'priorityScore', 'status'])
+        && data.keys().size() >= 14 && data.keys().size() <= 17
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 100
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 1000
+        && data.authorId is string && data.authorId == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 100
+        && data.authorEmail is string && data.authorEmail.size() >= 3 && data.authorEmail.size() <= 100
+        // Counter checks
+        && data.upvotesCount is int && data.upvotesCount >= 0
+        && data.downvotesCount is int && data.downvotesCount >= 0
+        // Net Votes formula enforcement
+        && data.netVotes is int && data.netVotes == (data.upvotesCount - data.downvotesCount)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        // Category options checks
+        && data.category is string && (data.category == 'Governance' || data.category == 'Technical' || data.category == 'Community' || data.category == 'Treasury' || data.category == 'Events' || data.category == 'Meta')
+        // Tags array checks
+        && data.tags is list && data.tags.size() <= 15
+        && (data.tags.size() == 0 || (data.tags.size() > 0 && data.tags[0] is string))
+        // Priority Score check
+        && data.priorityScore is int && data.priorityScore == data.netVotes
+        // Optional lifecycle parameters (durationDays, expiresAt, and authorIsAgent)
+        && (!data.keys().hasAll(['durationDays']) || data.durationDays is int)
+        && (!data.keys().hasAll(['expiresAt']) || data.expiresAt is timestamp)
+        && (!data.keys().hasAll(['authorIsAgent']) || data.authorIsAgent is bool)
+        // Status checks
+        && data.status is string && (data.status == 'draft' || data.status == 'active' || data.status == 'passed' || data.status == 'rejected' || data.status == 'expired');
+    }
+
+    function isValidVote(data) {
+      return data.keys().hasAll(['userId', 'voterName', 'voteType', 'updatedAt'])
+        && data.keys().size() == 4
+        && data.userId is string && data.userId == request.auth.uid
+        && data.voterName is string && data.voterName.size() >= 1 && data.voterName.size() <= 100
+        && data.voteType is string && (data.voteType == 'up' || data.voteType == 'down')
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidComment(data) {
+      return data.keys().hasAll(['proposalId', 'content', 'authorId', 'authorName', 'authorEmail', 'upvotes', 'downvotes', 'createdAt'])
+        && data.keys().size() >= 8 && data.keys().size() <= 12
+        && data.proposalId is string && data.proposalId.size() > 0 && data.proposalId.size() <= 128
+        && (!data.keys().hasAll(['parentId']) || data.parentId == null || (data.parentId is string && data.parentId.size() > 0 && data.parentId.size() <= 128))
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 5000
+        && data.authorId is string && data.authorId == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 100
+        && data.authorEmail is string && data.authorEmail.size() >= 3 && data.authorEmail.size() <= 100
+        && data.upvotes is int && data.upvotes >= 0
+        && data.downvotes is int && data.downvotes >= 0
+        && data.createdAt is timestamp
+        && (!data.keys().hasAll(['isInsightful']) || data.isInsightful is bool)
+        && (!data.keys().hasAll(['authorIsAgent']) || data.authorIsAgent is bool);
+    }
+
+    function isValidCommentVote(data) {
+      return data.keys().hasAll(['userId', 'voteType', 'updatedAt'])
+        && data.keys().size() == 3
+        && data.userId is string && data.userId == request.auth.uid
+        && data.voteType is string && (data.voteType == 'up' || data.voteType == 'down')
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'type', 'proposalId', 'message', 'read', 'createdAt'])
+        && (data.keys().size() == 6 || (data.keys().size() == 7 && data.keys().hasAll(['title'])))
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && data.type is string && data.type.size() > 0 && data.type.size() <= 100
+        && (data.proposalId == null || (data.proposalId is string && data.proposalId.size() > 0 && data.proposalId.size() <= 128))
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 2000
+        && data.read is bool
+        && data.createdAt is timestamp;
+    }
+
+    function isValidDelegation(data) {
+      return data.keys().hasAll(['delegatorId', 'delegatorName', 'delegateId', 'delegateName', 'category', 'createdAt'])
+        && data.keys().size() == 6
+        && data.delegatorId is string && data.delegatorId == request.auth.uid
+        && data.delegatorName is string && data.delegatorName.size() >= 1 && data.delegatorName.size() <= 100
+        && data.delegateId is string && data.delegateId.size() > 0 && data.delegateId.size() <= 128
+        && data.delegateName is string && data.delegateName.size() >= 1 && data.delegateName.size() <= 100
+        && data.category is string && (data.category == 'All' || data.category == 'Governance' || data.category == 'Technical' || data.category == 'Community' || data.category == 'Treasury' || data.category == 'Events' || data.category == 'Meta')
+        && data.createdAt is timestamp;
+    }
+
+    function isValidChallenge(data) {
+      return data.keys().hasAll(['title', 'description', 'category', 'startDate', 'endDate', 'prizeDescription', 'tag', 'creatorId', 'creatorName', 'createdAt'])
+        && data.keys().size() >= 10 && data.keys().size() <= 11
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 100
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 2000
+        && data.category is string && (data.category == 'All' || data.category == 'Governance' || data.category == 'Technical' || data.category == 'Community' || data.category == 'Treasury' || data.category == 'Events' || data.category == 'Meta')
+        && data.startDate is timestamp
+        && data.endDate is timestamp
+        && data.prizeDescription is string && data.prizeDescription.size() > 0 && data.prizeDescription.size() <= 200
+        && data.tag is string && data.tag.size() >= 1 && data.tag.size() <= 50
+        && data.creatorId is string && data.creatorId == request.auth.uid
+        && data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 100
+        && data.createdAt is timestamp
+        && (!data.keys().hasAll(['winnerProposalId']) || data.winnerProposalId is string || data.winnerProposalId == null);
+    }
+
+    // 4. Match Rules with relational checks
+    match /challenges/{challengeId} {
+      allow get, list: if true;
+      allow create: if isChallengeAdmin()
+                    && isValidId(challengeId)
+                    && isValidChallenge(incoming())
+                    && incoming().createdAt == request.time;
+      allow update: if isChallengeAdmin()
+                    && isValidId(challengeId)
+                    && isValidChallenge(incoming())
+                    && incoming().createdAt == existing().createdAt
+                    && (
+                      incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'prizeDescription', 'winnerProposalId', 'endDate'])
+                    );
+      allow delete: if isChallengeAdmin()
+                    && isValidId(challengeId);
+    }
+    match /users/{userId} {
+      allow get, list: if true;
+      allow create: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(userId) 
+                    && userId == request.auth.uid
+                    && incoming().userId == request.auth.uid
+                    && incoming().reputation == 0
+                    && incoming().streak == 0
+                    && incoming().joinedAt == request.time;
+      allow update: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(userId) 
+                    && userId == request.auth.uid
+                    && incoming().reputation == existing().reputation
+                    && incoming().badges == existing().badges
+                    && (!incoming().keys().hasAll(['isVerifiedAgent']) || incoming().isVerifiedAgent == existing().get('isVerifiedAgent', false))
+                    && (!incoming().keys().hasAll(['isAgent']) || incoming().isAgent == existing().get('isAgent', false));
+
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isSignedIn() && userId == request.auth.uid;
+        allow create: if false; // Sever-side admin write
+      }
+    }
+
+    match /notifications/{notificationId} {
+      allow create: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(notificationId) 
+                    && isValidNotification(incoming()) 
+                    && incoming().createdAt == request.time;
+                    
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      
+      allow update: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(notificationId) 
+                    && existing().userId == request.auth.uid 
+                    && incoming().userId == existing().userId
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+                    
+      allow delete: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(notificationId) 
+                    && existing().userId == request.auth.uid;
+    }
+
+    match /delegations/{delegationId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(delegationId) 
+                    && isValidDelegation(incoming()) 
+                    && incoming().createdAt == request.time;
+      allow delete: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(delegationId) 
+                    && existing().delegatorId == request.auth.uid;
+    }
+
+    match /proposals/{proposalId} {
+      allow get: if (existing().status != 'draft' || (isSignedIn() && existing().authorId == request.auth.uid));
+      allow list: if (resource.data.status != 'draft' || (isSignedIn() && resource.data.authorId == request.auth.uid));
+      
+      allow create: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(proposalId) 
+                    && isValidProposal(incoming()) 
+                    // Server forced timestamp checks
+                    && incoming().createdAt == request.time 
+                    && incoming().updatedAt == request.time 
+                    // Safe starting states
+                    && incoming().upvotesCount == 0 
+                    && incoming().downvotesCount == 0 
+                    && incoming().netVotes == 0
+                    && incoming().priorityScore == 0
+                    && (incoming().status == 'active' || incoming().status == 'draft');
+                    
+      allow update: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(proposalId) 
+                    && isValidProposal(incoming())
+                    && incoming().authorId == existing().authorId
+                    && incoming().createdAt == existing().createdAt
+                    && incoming().updatedAt == request.time
+                    && (
+                      // Action: Edit - Proposal text/category/tags/status/durationDays/expiresAt changed by original author
+                      (incoming().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'tags', 'status', 'durationDays', 'expiresAt', 'updatedAt'])) ||
+                      // Action: Vote - Vote counters modified by signed in voters
+                      (incoming().title == existing().title && incoming().description == existing().description && incoming().category == existing().category && incoming().tags == existing().tags && incoming().diff(existing()).affectedKeys().hasOnly(['upvotesCount', 'downvotesCount', 'netVotes', 'priorityScore', 'updatedAt', 'status']))
+                    );
+                    
+      allow delete: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(proposalId) 
+                    && existing().authorId == request.auth.uid;
+
+      // Uniquely track user votes under proposal path to avoid double voting (Pillar 1/8)
+      match /votes/{userId} {
+        allow get: if isSignedIn();
+        allow list: if isSignedIn(); // Let any logged in user view the voter list for results transparency and Turnout math
+        
+        allow create, update: if isSignedIn() 
+                              && isEmailVerified() 
+                              && isValidId(userId) 
+                              && userId == request.auth.uid 
+                              && isValidVote(incoming()) 
+                              && incoming().updatedAt == request.time;
+                              
+        allow delete: if isSignedIn() 
+                      && isEmailVerified() 
+                      && isValidId(userId) 
+                      && userId == request.auth.uid;
+      }
+    }
+
+    match /comments/{commentId} {
+      allow get: if true;
+      allow list: if true;
+      
+      allow create: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(commentId) 
+                    && isValidComment(incoming()) 
+                    && incoming().createdAt == request.time 
+                    && incoming().upvotes == 0 
+                    && incoming().downvotes == 0;
+                    
+      allow update: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(commentId) 
+                    && isValidComment(incoming())
+                    && incoming().proposalId == existing().proposalId
+                    && incoming().authorId == existing().authorId
+                    && incoming().createdAt == existing().createdAt
+                    && (
+                      // Action: Edit content by comment author
+                      (incoming().parentId == existing().parentId && !incoming().keys().hasAll(['isInsightful']) && incoming().authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['content'])) ||
+                      // Action: Vote counters modified
+                      (incoming().parentId == existing().parentId && incoming().content == existing().content && !incoming().keys().hasAll(['isInsightful']) && incoming().diff(existing()).affectedKeys().hasOnly(['upvotes', 'downvotes'])) ||
+                      // Action: Mark insightful by proposal author
+                      (incoming().parentId == existing().parentId && incoming().content == existing().content && incoming().upvotes == existing().upvotes && incoming().downvotes == existing().downvotes && get(/databases/$(database)/documents/proposals/$(existing().proposalId)).data.authorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['isInsightful']))
+                    );
+                    
+      allow delete: if isSignedIn() 
+                    && isEmailVerified() 
+                    && isValidId(commentId) 
+                    && existing().authorId == request.auth.uid;
+
+      match /commentVotes/{userId} {
+        allow get: if isSignedIn() && userId == request.auth.uid;
+        allow list: if false;
+        
+        allow create, update: if isSignedIn() 
+                              && isEmailVerified() 
+                              && isValidId(userId) 
+                              && userId == request.auth.uid 
+                              && isValidCommentVote(incoming()) 
+                              && incoming().updatedAt == request.time;
+                              
+        allow delete: if isSignedIn() 
+                      && isEmailVerified() 
+                      && isValidId(userId) 
+                      && userId == request.auth.uid;
+      }
+    }
+  }
+}
