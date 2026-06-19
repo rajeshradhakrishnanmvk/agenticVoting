@@ -4,8 +4,9 @@
  */
 
 export interface SDKLoginOptions {
-  email: string;
-  appPassword: string;
+  email?: string;
+  appPassword?: string;
+  token?: string;
 }
 
 export interface SDKProposeOptions {
@@ -36,6 +37,7 @@ export interface SDKGetFeedOptions {
 export class GoBodhiAgentSDK {
   private email: string = "";
   private appPassword: string = "";
+  private token: string = "";
   private baseUrl: string = "";
 
   constructor(options?: { baseUrl?: string }) {
@@ -51,14 +53,21 @@ export class GoBodhiAgentSDK {
   }
 
   /**
-   * Set authentication credentials for subsequent API calls.
+   * Set authentication credentials or bearer tokens for subsequent API calls.
    */
   login(options: SDKLoginOptions): void {
-    if (!options.email || !options.appPassword) {
-      throw new Error("SDK Error: Both email and appPassword are required to login.");
+    if (options.token) {
+      this.token = options.token.trim();
+      this.email = "";
+      this.appPassword = "";
+    } else {
+      if (!options.email || !options.appPassword) {
+        throw new Error("SDK Error: Either email and appPassword, or a secure auth token, is required to login.");
+      }
+      this.email = options.email.trim();
+      this.appPassword = options.appPassword.trim();
+      this.token = "";
     }
-    this.email = options.email.trim();
-    this.appPassword = options.appPassword.trim();
   }
 
   /**
@@ -194,20 +203,36 @@ export class GoBodhiAgentSDK {
 
   // Private helpers
   private ensureAuth() {
-    if (!this.email || !this.appPassword) {
-      throw new Error("SDK Error: Agent is unauthenticated. Please call gobodhi.login({ email, appPassword }) before making write operations.");
+    if (!this.token && (!this.email || !this.appPassword)) {
+      throw new Error("SDK Error: Agent is unauthenticated. Please call gobodhi.login({ email, appPassword }) or gobodhi.login({ token }) before making write operations.");
     }
   }
 
   private getHeaders(): Record<string, string> {
+    // Enforce HTTPS requirements in production to block credential/token interception (MITM protection)
+    if (this.baseUrl.startsWith("http:") && !this.baseUrl.includes("localhost") && !this.baseUrl.includes("127.0.0.1")) {
+      const isProduction = typeof window !== "undefined"
+        ? !window.location.hostname.includes("localhost") && !window.location.hostname.includes("127.0.0.1")
+        : (typeof process !== "undefined" && process.env && process.env.NODE_ENV === "production");
+      if (isProduction) {
+        throw new Error("SDK Security Error: HTTPS is strictly required for remote production connections to protect credentials and tokens.");
+      }
+    }
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json"
     };
-    if (this.email && this.appPassword) {
+
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    } else if (this.email && this.appPassword) {
       headers["X-Gmail-Email"] = this.email;
       headers["X-Gmail-App-Password"] = this.appPassword;
-      // Also attach basic auth as robust support
-      const basic = Buffer.from(`${this.email}:${this.appPassword}`).toString("base64");
+      // Also attach basic auth as robust support (cross-runtime safe Base64)
+      const rawCreds = `${this.email}:${this.appPassword}`;
+      const basic = typeof btoa !== "undefined"
+        ? btoa(rawCreds)
+        : Buffer.from(rawCreds).toString("base64");
       headers["Authorization"] = `Basic ${basic}`;
     }
     return headers;

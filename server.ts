@@ -6,11 +6,58 @@ import { createServer as createViteServer } from "vite";
 import fs from "fs";
 // @ts-ignore
 import svg2img from "svg2img";
+import crypto from "crypto";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// SSRF webhooks protection hostname validator
+function isValidWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") {
+      return false;
+    }
+    const hostname = parsed.hostname;
+    // Block private / loopback IP ranges
+    if (/^(localhost|127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/.test(hostname)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Securely dispatching outgoing webhooks with signature verification
+async function triggerServerWebhook(webhookUrl: string, payload: any) {
+  if (!webhookUrl || !isValidWebhookUrl(webhookUrl)) {
+    return;
+  }
+  try {
+    const secret = process.env.WEBHOOK_SECRET || "default_voter_webhook_secret";
+    const signature = crypto
+      .createHmac("sha256", secret)
+      .update(JSON.stringify(payload))
+      .digest("hex");
+
+    fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Webhook-Signature": signature
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000)
+    }).catch((err) => {
+      console.warn(`[WEBHOOK] Failed delivering to ${webhookUrl}:`, err);
+    });
+  } catch (err) {
+    console.warn(`[WEBHOOK] Failed executing signature or transmission for ${webhookUrl}:`, err);
+  }
+}
 
 // Lazy initialization of firebase-admin
 let adminAuth: admin.auth.Auth | null = null;
@@ -28,6 +75,25 @@ try {
   }
 } catch (error) {
   console.warn("Failed to initialize Firebase Admin natively on startup. Will retry on demand or run without it:", error);
+}
+
+// Robust centralized Firestore admin database initialization targeting correct databaseId
+let cachedDb: admin.firestore.Firestore | null = null;
+async function getAdminDb(): Promise<admin.firestore.Firestore> {
+  if (cachedDb) return cachedDb;
+  const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
+  let firebaseConfig: any = {};
+  if (fs.existsSync(firebaseConfigPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
+  }
+  if (admin.apps.length === 0) {
+    admin.initializeApp({
+      projectId: firebaseConfig.projectId,
+    });
+  }
+  const { getFirestore } = await import("firebase-admin/firestore");
+  cachedDb = getFirestore(admin.app(), firebaseConfig.firestoreDatabaseId || "(default)") as any;
+  return cachedDb!;
 }
 
 // API Route for verifying Gmail ID and Google App Password
@@ -178,43 +244,13 @@ function escapeXml(unsafe: string): string {
 // Robust Firestore admin fetch with database ID fallback
 const getProposalFromAdmin = async (proposalId: string) => {
   try {
-    const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-    let firebaseConfig: any = {};
-    if (fs.existsSync(firebaseConfigPath)) {
-      firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-    }
-    
-    if (admin.apps.length === 0) {
-      admin.initializeApp({
-        projectId: firebaseConfig.projectId,
-      });
-    }
-
-    const firestoreDb = admin.firestore();
-    const docRef = firestoreDb.collection("proposals").doc(proposalId);
-    const docSnap = await docRef.get();
+    const adminDb = await getAdminDb();
+    const docSnap = await adminDb.collection("proposals").doc(proposalId).get();
     if (docSnap.exists) {
       return docSnap.data();
     }
   } catch (err) {
-    console.warn("First-pass Admin Firestore lookup failed; checking custom databaseId:", err);
-    try {
-      const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-      if (fs.existsSync(firebaseConfigPath)) {
-        const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-        const { Firestore } = await import("firebase-admin/firestore");
-        const customDb = new Firestore({
-          projectId: firebaseConfig.projectId,
-          databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-        });
-        const docSnap = await customDb.collection("proposals").doc(proposalId).get();
-        if (docSnap.exists) {
-          return docSnap.data();
-        }
-      }
-    } catch (innerErr) {
-      console.error("Both fallback Firestore admin lookups failed:", innerErr);
-    }
+    console.error("getProposalFromAdmin lookup failed:", err);
   }
   return null;
 };
@@ -447,17 +483,7 @@ async function runDirectRecalculation() {
   if (isRecalculating) return;
   isRecalculating = true;
   try {
-    const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-    if (!fs.existsSync(firebaseConfigPath)) {
-      isRecalculating = false;
-      return;
-    }
-    const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-    const { Firestore } = await import("firebase-admin/firestore");
-    const adminDb = new Firestore({
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-    });
+    const adminDb = await getAdminDb();
 
     // Obtain core datasets
     const proposalsSnap = await adminDb.collection("proposals").get();
@@ -626,25 +652,21 @@ async function runDirectRecalculation() {
         });
 
         // Trigger webhook delivery if configured for agent
-        if (existingUser.webhookUrl && existingUser.webhookUrl.startsWith("http")) {
-          fetch(existingUser.webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              event: "notification",
-              timestamp: new Date().toISOString(),
-              notification: {
-                id: badgeNotifId,
-                userId: uid,
-                type: "badge",
-                proposalId: null,
-                title: "New Badge Earned",
-                message: `You earned a badge: "${badge}"`,
-                read: false,
-                createdAt: new Date().toISOString()
-              }
-            })
-          }).catch(() => {});
+        if (existingUser.webhookUrl) {
+          triggerServerWebhook(existingUser.webhookUrl, {
+            event: "notification",
+            timestamp: new Date().toISOString(),
+            notification: {
+              id: badgeNotifId,
+              userId: uid,
+              type: "badge",
+              proposalId: null,
+              title: "New Badge Earned",
+              message: `You earned a badge: "${badge}"`,
+              read: false,
+              createdAt: new Date().toISOString()
+            }
+          });
         }
       }
 
@@ -672,15 +694,7 @@ async function runDirectRecalculation() {
 // Compile and email digest reports to signed-up users (can be tested manually)
 const sendEmailDigest = async (userId: string, forceType?: "daily" | "weekly") => {
   try {
-    const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-    if (!fs.existsSync(firebaseConfigPath)) return;
-    const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-    const { Firestore } = await import("firebase-admin/firestore");
-    
-    const dbAdmin = new Firestore({
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-    });
+    const dbAdmin = await getAdminDb();
 
     const userSnap = await dbAdmin.collection("users").doc(userId).get();
     if (!userSnap.exists) return;
@@ -792,14 +806,7 @@ app.post("/api/recalculate", async (req, res) => {
 // Start background change listeners
 async function startRealtimeListeners() {
   try {
-    const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-    if (!fs.existsSync(firebaseConfigPath)) return;
-    const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-    const { Firestore } = await import("firebase-admin/firestore");
-    const adminDb = new Firestore({
-      projectId: firebaseConfig.projectId,
-      databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-    });
+    const adminDb = await getAdminDb();
 
     const triggerRecalc = () => {
       runDirectRecalculation();
@@ -822,15 +829,7 @@ async function startProposalLifecycleScheduler() {
   
   const checkActiveProposals = async () => {
     try {
-      const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-      if (!fs.existsSync(firebaseConfigPath)) return;
-      const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-      const { Firestore } = await import("firebase-admin/firestore");
-      
-      const adminDb = new Firestore({
-        projectId: firebaseConfig.projectId,
-        databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-      });
+      const adminDb = await getAdminDb();
 
       const now = new Date();
       // Get all active proposals
@@ -899,25 +898,21 @@ async function startProposalLifecycleScheduler() {
             const userSnap = await adminDb.collection("users").doc(authorId).get();
             if (userSnap.exists) {
               const uData = userSnap.data();
-              if (uData && uData.webhookUrl && uData.webhookUrl.startsWith("http")) {
-                fetch(uData.webhookUrl, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    event: "notification",
-                    timestamp: new Date().toISOString(),
-                    notification: {
-                      id: warnNotifId,
-                      userId: authorId,
-                      type: "expiration_warning",
-                      proposalId: proposalDoc.id,
-                      title: "Proposal Expiring Soon",
-                      message: textContent,
-                      read: false,
-                      createdAt: new Date().toISOString()
-                    }
-                  })
-                }).catch(() => {});
+              if (uData && uData.webhookUrl) {
+                triggerServerWebhook(uData.webhookUrl, {
+                  event: "notification",
+                  timestamp: new Date().toISOString(),
+                  notification: {
+                    id: warnNotifId,
+                    userId: authorId,
+                    type: "expiration_warning",
+                    proposalId: proposalDoc.id,
+                    title: "Proposal Expiring Soon",
+                    message: textContent,
+                    read: false,
+                    createdAt: new Date().toISOString()
+                  }
+                });
               }
             }
           }
@@ -976,25 +971,21 @@ async function startProposalLifecycleScheduler() {
             const authorUserSnap = await adminDb.collection("users").doc(authorId).get();
             if (authorUserSnap.exists) {
               const uData = authorUserSnap.data();
-              if (uData && uData.webhookUrl && uData.webhookUrl.startsWith("http")) {
-                fetch(uData.webhookUrl, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    event: "notification",
-                    timestamp: new Date().toISOString(),
-                    notification: {
-                      id: notificationId,
-                      userId: authorId,
-                      type: "conclude",
-                      proposalId: proposalDoc.id,
-                      title,
-                      message: content,
-                      read: false,
-                      createdAt: new Date().toISOString()
-                    }
-                  })
-                }).catch(() => {});
+              if (uData && uData.webhookUrl) {
+                triggerServerWebhook(uData.webhookUrl, {
+                  event: "notification",
+                  timestamp: new Date().toISOString(),
+                  notification: {
+                    id: notificationId,
+                    userId: authorId,
+                    type: "conclude",
+                    proposalId: proposalDoc.id,
+                    title,
+                    message: content,
+                    read: false,
+                    createdAt: new Date().toISOString()
+                  }
+                });
               }
             }
 
@@ -1049,25 +1040,21 @@ async function startProposalLifecycleScheduler() {
               const voterUserSnap = await adminDb.collection("users").doc(voterId).get();
               if (voterUserSnap.exists) {
                 const vData = voterUserSnap.data();
-                if (vData && vData.webhookUrl && vData.webhookUrl.startsWith("http")) {
-                  fetch(vData.webhookUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      event: "notification",
-                      timestamp: new Date().toISOString(),
-                      notification: {
-                        id: voterNotifId,
-                        userId: voterId,
-                        type: "conclude",
-                        proposalId: proposalDoc.id,
-                        title: "Proposal Resolved",
-                        message: voterContent,
-                        read: false,
-                        createdAt: new Date().toISOString()
-                      }
-                    })
-                  }).catch(() => {});
+                if (vData && vData.webhookUrl) {
+                  triggerServerWebhook(vData.webhookUrl, {
+                    event: "notification",
+                    timestamp: new Date().toISOString(),
+                    notification: {
+                      id: voterNotifId,
+                      userId: voterId,
+                      type: "conclude",
+                      proposalId: proposalDoc.id,
+                      title: "Proposal Resolved",
+                      message: voterContent,
+                      read: false,
+                      createdAt: new Date().toISOString()
+                    }
+                  });
                 }
               }
             }
@@ -1092,69 +1079,66 @@ startProposalLifecycleScheduler();
 // AGENT SDK API V1 ENDPOINTS
 // ==========================================
 
-let cachedDb: admin.firestore.Firestore | null = null;
-async function getAdminDb(): Promise<admin.firestore.Firestore> {
-  if (cachedDb) return cachedDb;
-  const firebaseConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-  let firebaseConfig: any = {};
-  if (fs.existsSync(firebaseConfigPath)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, "utf-8"));
-  }
-  
-  if (admin.apps.length === 0) {
-    admin.initializeApp({
-      projectId: firebaseConfig.projectId,
-    });
-  }
-  
-  const { Firestore } = await import("firebase-admin/firestore");
-  cachedDb = new Firestore({
-    projectId: firebaseConfig.projectId,
-    databaseId: firebaseConfig.firestoreDatabaseId || "(default)"
-  }) as any;
-  
-  return cachedDb!;
-}
-
 // Authentication middleware for agents
 async function authenticateAgent(req: any, res: any, next: any) {
   let email = "";
   let appPassword = "";
+  let authenticatedDecodedUser: any = null;
 
-  // 1. Headers (Custom)
-  if (req.headers["x-gmail-email"]) {
-    email = String(req.headers["x-gmail-email"]);
-  }
-  if (req.headers["x-gmail-app-password"]) {
-    appPassword = String(req.headers["x-gmail-app-password"]);
-  }
-
-  // 2. Headers (Basic Auth)
-  if (!email && !appPassword && req.headers.authorization) {
+  // 1. Bearer Token Check (OAuth 2.0 / Firebase JWT Token)
+  if (req.headers.authorization) {
     const authHeader = String(req.headers.authorization);
-    if (authHeader.startsWith("Basic ")) {
-      try {
-        const credentials = Buffer.from(authHeader.substring(6), "base64").toString("utf-8");
-        const parts = credentials.split(":");
-        if (parts.length >= 2) {
-          email = parts[0];
-          appPassword = parts.slice(1).join(":");
+    if (authHeader.startsWith("Bearer ")) {
+      const idToken = authHeader.substring(7);
+      if (adminAuth) {
+        try {
+          const decodedToken = await adminAuth.verifyIdToken(idToken);
+          email = decodedToken.email || "";
+          authenticatedDecodedUser = decodedToken;
+          console.log(`OAuth Bearer Token authentication successful for email: ${email}`);
+        } catch (e: any) {
+          console.warn("REST API: Bearer token verification failed:", e.message);
         }
-      } catch (e) {
-        console.warn("REST API: Failed to parse Basic Auth header:", e);
       }
     }
   }
 
-  // 3. Body or Query
-  if (!email && !appPassword) {
-    email = String(req.body?.email || req.query?.email || "");
-    appPassword = String(req.body?.appPassword || req.query?.appPassword || "");
+  if (!authenticatedDecodedUser) {
+    // 2. Headers (Custom)
+    if (req.headers["x-gmail-email"]) {
+      email = String(req.headers["x-gmail-email"]);
+    }
+    if (req.headers["x-gmail-app-password"]) {
+      appPassword = String(req.headers["x-gmail-app-password"]);
+    }
+
+    // 3. Headers (Basic Auth)
+    if (!email && !appPassword && req.headers.authorization) {
+      const authHeader = String(req.headers.authorization);
+      if (authHeader.startsWith("Basic ")) {
+        try {
+          const credentials = Buffer.from(authHeader.substring(6), "base64").toString("utf-8");
+          const parts = credentials.split(":");
+          if (parts.length >= 2) {
+            email = parts[0];
+            appPassword = parts.slice(1).join(":");
+          }
+        } catch (e) {
+          console.warn("REST API: Failed to parse Basic Auth header:", e);
+        }
+      }
+    }
+
+    // 4. Body or Query
+    if (!email && !appPassword) {
+      email = String(req.body?.email || req.query?.email || "");
+      appPassword = String(req.body?.appPassword || req.query?.appPassword || "");
+    }
   }
 
-  if (!email || !appPassword) {
+  if (!authenticatedDecodedUser && (!email || !appPassword)) {
     return res.status(401).json({
-      error: "Authentication failed. Provide your goBodhi credentials via 'X-Gmail-Email' and 'X-Gmail-App-Password' headers, Basic Auth (email:appPassword), query params, or JSON body."
+      error: "Authentication failed. Provide your goBodhi credentials via 'X-Gmail-Email' and 'X-Gmail-App-Password' headers, Basic Auth (email:appPassword), Bearer Token, query params, or JSON body."
     });
   }
 
@@ -1183,63 +1167,67 @@ async function authenticateAgent(req: any, res: any, next: any) {
     let uid = "";
     let displayName = cleanEmail.split("@")[0];
 
-    // Try Standard Firebase Auth REST API Sign In
-    const signInRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: cleanEmail,
-        password: cleanPassword,
-        returnSecureToken: true
-      })
-    });
-
-    if (signInRes.ok) {
-      const signInData: any = await signInRes.json();
-      uid = signInData.localId;
-      displayName = signInData.displayName || displayName;
+    if (authenticatedDecodedUser) {
+      uid = authenticatedDecodedUser.uid;
+      displayName = authenticatedDecodedUser.name || displayName;
     } else {
-      // SMTP Verification Fallback for first-time / SDK login
-      console.log(`Firebase REST sign-in failed, checking Gmail SMTP server for credentials verification of ${cleanEmail}`);
-      const transporter = nodemailer.createTransport({
-        host: "smtp.gmail.com",
-        port: 465,
-        secure: true,
-        auth: {
-          user: cleanEmail,
-          pass: cleanPassword,
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
+      // Try Standard Firebase Auth REST API Sign In
+      const signInRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: cleanPassword,
+          returnSecureToken: true
+        })
       });
 
-      try {
-        await transporter.verify();
-        console.log(`Fallback SMTP verification successful for agent ${cleanEmail}`);
-        
-        let userAuth = admin.auth();
-        let userRecord: admin.auth.UserRecord;
+      if (signInRes.ok) {
+        const signInData: any = await signInRes.json();
+        uid = signInData.localId;
+        displayName = signInData.displayName || displayName;
+      } else {
+        // SMTP Verification Fallback for first-time / SDK login
+        console.log(`Firebase REST sign-in failed, checking Gmail SMTP server for credentials verification of ${cleanEmail}`);
+        const transporter = nodemailer.createTransport({
+          host: "smtp.gmail.com",
+          port: 465,
+          secure: true,
+          auth: {
+            user: cleanEmail,
+            pass: cleanPassword,
+          },
+          connectionTimeout: 8000,
+          greetingTimeout: 8000,
+        });
+
         try {
-          userRecord = await userAuth.getUserByEmail(cleanEmail);
-          await userAuth.updateUser(userRecord.uid, {
-            password: cleanPassword,
-            emailVerified: true
-          });
-          uid = userRecord.uid;
-          displayName = userRecord.displayName || displayName;
-        } catch (getErr: any) {
-          if (getErr.code === "auth/user-not-found") {
-            userRecord = await userAuth.createUser({
-              email: cleanEmail,
-              emailVerified: true,
-              displayName,
-              password: cleanPassword
+          await transporter.verify();
+          console.log(`Fallback SMTP verification successful for agent ${cleanEmail}`);
+          
+          let userAuth = admin.auth();
+          let userRecord: admin.auth.UserRecord;
+          try {
+            userRecord = await userAuth.getUserByEmail(cleanEmail);
+            await userAuth.updateUser(userRecord.uid, {
+              password: cleanPassword,
+              emailVerified: true
             });
             uid = userRecord.uid;
-          } else {
-            throw getErr;
+            displayName = userRecord.displayName || displayName;
+          } catch (getErr: any) {
+            if (getErr.code === "auth/user-not-found") {
+              userRecord = await userAuth.createUser({
+                email: cleanEmail,
+                emailVerified: true,
+                displayName,
+                password: cleanPassword
+              });
+              uid = userRecord.uid;
+            } else {
+              throw getErr;
+            }
           }
-        }
 
         // Initialize user document in Firestore if not already matching
         const userDocRef = db.collection("users").doc(uid);
@@ -1263,6 +1251,7 @@ async function authenticateAgent(req: any, res: any, next: any) {
         });
       }
     }
+  }
 
     req.agent = {
       uid,

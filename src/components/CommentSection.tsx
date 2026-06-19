@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import DOMPurify from "dompurify";
 import { 
   collection, 
   query, 
@@ -62,6 +63,12 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
   const [replyText, setReplyText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // Rate limiting & length guidelines state
+  const lastSubmitTimeRef = React.useRef<number>(0);
+  const MAX_COMMENT_LENGTH = 1000;
+  const MIN_COMMENT_LENGTH = 3;
+  const SUBMIT_COOLDOWN_MS = 5000; // 5 seconds spam protection time window
   
   // Load comments in real-time
   useEffect(() => {
@@ -261,6 +268,22 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
     const trimmed = newCommentText.trim();
     if (!trimmed) return;
 
+    if (trimmed.length < MIN_COMMENT_LENGTH) {
+      setErrorMsg(`Comment is too short. Minimum ${MIN_COMMENT_LENGTH} characters required.`);
+      return;
+    }
+    if (trimmed.length > MAX_COMMENT_LENGTH) {
+      setErrorMsg(`Comment exceeds maximum limit of ${MAX_COMMENT_LENGTH} characters.`);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastSubmitTimeRef.current < SUBMIT_COOLDOWN_MS) {
+      const waitRemaining = Math.ceil((SUBMIT_COOLDOWN_MS - (now - lastSubmitTimeRef.current)) / 1000);
+      setErrorMsg(`You are posting comments too quickly. Please wait ${waitRemaining}s.`);
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMsg(null);
 
@@ -279,6 +302,7 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
         createdAt: serverTimestamp()
       });
       setNewCommentText("");
+      lastSubmitTimeRef.current = Date.now();
     } catch (err) {
       console.error("Submitting comment failed: ", err);
       try {
@@ -301,6 +325,22 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
     const trimmed = replyText.trim();
     if (!trimmed) return;
 
+    if (trimmed.length < MIN_COMMENT_LENGTH) {
+      setErrorMsg(`Reply is too short. Minimum ${MIN_COMMENT_LENGTH} characters required.`);
+      return;
+    }
+    if (trimmed.length > MAX_COMMENT_LENGTH) {
+      setErrorMsg(`Reply exceeds maximum limit of ${MAX_COMMENT_LENGTH} characters.`);
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastSubmitTimeRef.current < SUBMIT_COOLDOWN_MS) {
+      const waitRemaining = Math.ceil((SUBMIT_COOLDOWN_MS - (now - lastSubmitTimeRef.current)) / 1000);
+      setErrorMsg(`You are responding too quickly. Please wait ${waitRemaining}s.`);
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMsg(null);
 
@@ -320,6 +360,7 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
       });
       setReplyText("");
       setReplyTargetId(null);
+      lastSubmitTimeRef.current = Date.now();
 
       // Trigger notification for parent comment owner
       const parentComment = comments.find(c => c.id === parentId);
@@ -552,7 +593,33 @@ export default function CommentSection({ proposalId, user, proposalCreatedAt, pr
 
           {/* Comment Markdown Render */}
           <div className="text-sm font-normal text-slate-700 leading-relaxed font-sans prose prose-slate max-w-full break-words">
-            <ReactMarkdown>{comment.content}</ReactMarkdown>
+            <ReactMarkdown
+              components={{
+                a: ({ href, children, ...props }) => {
+                  const isSafe = href && /^(https?:|mailto:|tel:)/i.test(href);
+                  return (
+                    <a
+                      href={isSafe ? href : "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-600 hover:underline inline-flex items-center"
+                      {...props}
+                    >
+                      {children}
+                    </a>
+                  );
+                }
+              }}
+            >
+              {DOMPurify.sanitize(comment.content, {
+                USE_PROFILES: { html: true },
+                ALLOWED_TAGS: [
+                  "p", "br", "strong", "em", "b", "i", "code", "pre", "span", "a", "ul", "ol", "li",
+                  "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "del", "ins"
+                ],
+                ALLOWED_ATTR: ["href", "title", "target", "rel"]
+              })}
+            </ReactMarkdown>
           </div>
 
           {/* Interaction Row */}

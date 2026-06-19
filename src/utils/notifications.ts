@@ -12,6 +12,59 @@ import {
 } from "firebase/firestore";
 
 /**
+ * Validates webhook URLs to prevent SSRF and protocol downgrades.
+ */
+export function isValidWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // Only allow HTTPS in production environments
+    const isProd = (import.meta as any).env ? (import.meta as any).env.PROD : false;
+    if (isProd && parsed.protocol !== "https:") {
+      return false;
+    }
+    // Block private/loopback/internal IP and hostname allocations
+    const hostname = parsed.hostname;
+    if (/^(localhost|127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/.test(hostname)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Computes an HMAC SHA-256 signature using the browser/environment's SubtleCrypto API.
+ * This is native, async, and fully compatible with both browser (Vite SPA) and Node.js.
+ */
+async function computeSignature(message: string, secret: string): Promise<string> {
+  try {
+    const enc = new TextEncoder();
+    const keyBytes = enc.encode(secret);
+    const messageBytes = enc.encode(message);
+    
+    const cryptoObj = typeof window !== "undefined" ? window.crypto : (globalThis.crypto as any);
+    if (!cryptoObj || !cryptoObj.subtle) {
+      return "";
+    }
+    
+    const key = await cryptoObj.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    
+    const sigBuffer = await cryptoObj.subtle.sign("HMAC", key, messageBytes);
+    const hashArray = Array.from(new Uint8Array(sigBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Triggers a configured agent webhook for a user
  */
 export async function triggerWebhook(userId: string, notification: any) {
@@ -19,21 +72,38 @@ export async function triggerWebhook(userId: string, notification: any) {
     const userDoc = await getDoc(doc(db, "users", userId));
     if (userDoc.exists()) {
       const userData = userDoc.data();
-      if (userData.webhookUrl && userData.webhookUrl.startsWith("http")) {
+      if (userData.webhookUrl && isValidWebhookUrl(userData.webhookUrl)) {
+        const payload = {
+          event: "notification",
+          timestamp: new Date().toISOString(),
+          notification: {
+            ...notification,
+            createdAt: new Date().toISOString()
+          }
+        };
+
+        const secret = ((import.meta as any).env ? (import.meta as any).env.VITE_WEBHOOK_SECRET : null) || "default_voter_webhook_secret";
+        
+        let signature = "";
+        try {
+          signature = await computeSignature(JSON.stringify(payload), secret);
+        } catch (sigErr) {
+          console.warn("[WEBHOOK] Failed computing HMAC signature:", sigErr);
+        }
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json"
+        };
+        if (signature) {
+          headers["X-Webhook-Signature"] = signature;
+        }
+
         // Send asynchronously and swallow failures so it doesn't block UI flow
         fetch(userData.webhookUrl, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            event: "notification",
-            timestamp: new Date().toISOString(),
-            notification: {
-              ...notification,
-              createdAt: new Date().toISOString()
-            }
-          })
+          headers,
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(5000)
         }).catch(err => {
           console.warn(`[WEBHOOK] Failed delivering to ${userData.webhookUrl}:`, err);
         });

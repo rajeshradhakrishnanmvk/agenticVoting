@@ -1,7 +1,27 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore, doc, getDocFromServer } from "firebase/firestore";
-import firebaseConfig from "../firebase-applet-config.json";
+import firebaseConfigFromJson from "../firebase-applet-config.json";
+
+const getEnvVar = (key: string): string | undefined => {
+  if (typeof import.meta !== "undefined" && (import.meta as any).env) {
+    return (import.meta as any).env[key];
+  }
+  if (typeof process !== "undefined" && process.env) {
+    return process.env[key];
+  }
+  return undefined;
+};
+
+const firebaseConfig = {
+  apiKey: getEnvVar("VITE_FIREBASE_API_KEY") || firebaseConfigFromJson.apiKey,
+  authDomain: getEnvVar("VITE_FIREBASE_AUTH_DOMAIN") || firebaseConfigFromJson.authDomain,
+  projectId: getEnvVar("VITE_FIREBASE_PROJECT_ID") || firebaseConfigFromJson.projectId,
+  storageBucket: getEnvVar("VITE_FIREBASE_STORAGE_BUCKET") || firebaseConfigFromJson.storageBucket,
+  messagingSenderId: getEnvVar("VITE_FIREBASE_MESSAGING_SENDER_ID") || firebaseConfigFromJson.messagingSenderId,
+  appId: getEnvVar("VITE_FIREBASE_APP_ID") || firebaseConfigFromJson.appId,
+  firestoreDatabaseId: getEnvVar("VITE_FIREBASE_DATABASE_ID") || firebaseConfigFromJson.firestoreDatabaseId
+};
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -63,8 +83,21 @@ export function handleFirestoreError(
     path,
   };
   
-  console.error("Firestore Error Detailed info: ", JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  const isProd = typeof window !== "undefined"
+    ? !window.location.hostname.includes("localhost") && !window.location.hostname.includes("127.0.0.1")
+    : (typeof process !== "undefined" && process.env && process.env.NODE_ENV === "production");
+
+  if (!isProd) {
+    console.error("Firestore Error Detailed info: ", JSON.stringify(errInfo));
+    throw new Error(JSON.stringify(errInfo));
+  } else {
+    if (typeof window === "undefined") {
+      console.error("[SECURITY] Firestore transaction failed:", JSON.stringify(errInfo));
+    } else {
+      console.error("[SECURITY] Firestore operation transaction failed.");
+    }
+    throw new Error("A database transaction error occurred. Please try again later.");
+  }
 }
 
 // Validate Connection to Firestore (as mandated by instructions)
